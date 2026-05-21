@@ -2,37 +2,37 @@
 
 ## Requisitos previos
 - Proxmox VE instalado (cluster con nodos: Marisma001, Marisma002, Marisma003)
-- Template LXC de Debian/Ubuntu descargado (ej. `ubuntu-24.04-standard_24.04-2_amd64.tar.zst`)
-- Red configurada en Proxmox
+- Template LXC de Ubuntu descargado: `ubuntu-24.04-standard_24.04-2_amd64.tar.zst`
+- Red: `192.168.8.0/24`
 
 > **Nota:** Keepalived requiere contenedores **privilegiados** para funcionar (necesita acceso a capacidades de red como `CAP_NET_ADMIN` y `CAP_NET_RAW`).
 
 ---
 
-## Paso 1: Crear dos contenedores web en Proxmox
-
-Crea dos contenedores LXC con la misma configuración:
+## Paso 1: Crear los contenedores web
 
 | CT | Nombre | IP | Rol |
 |---|---|---|---|
-| CT 201 | server-mario1 | 192.168.1.101 | Servidor principal |
-| CT 202 | server-mario2 | 192.168.1.102 | Servidor secundario |
+| CT 201 | mario-server1 | 192.168.8.101 | Servidor principal |
+| CT 202 | mario-server2 | 192.168.8.102 | Servidor secundario |
 
 ```bash
-# Descargar template si no lo tienes
+# Ver templates disponibles
 pveam update
 pveam available | grep ubuntu
 
-# Desde el nodo principal de Proxmox, crear los contenedores
-pct create 201 server-mario1 --storage local --memory 512 \
-  --net0 name=eth0,bridge=vmbr0,ip=192.168.1.101/24,gw=192.168.1.1 \
-  --ostype ubuntu --unprivileged 0 --features nesting=1
+# Crear contenedores
+pct create 201 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
+  --storage local-lvm --memory 512 \
+  --net0 name=eth0,bridge=vmbr0,ip=192.168.8.101/24,gw=192.168.8.1 \
+  --hostname mario-server1 --ostype ubuntu --unprivileged 0 --features nesting=1
 
-pct create 202 server-mario2 --storage local --memory 512 \
-  --net0 name=eth0,bridge=vmbr0,ip=192.168.1.102/24,gw=192.168.1.1 \
-  --ostype ubuntu --unprivileged 0 --features nesting=1
+pct create 202 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
+  --storage local-lvm --memory 512 \
+  --net0 name=eth0,bridge=vmbr0,ip=192.168.8.102/24,gw=192.168.8.1 \
+  --hostname mario-server2 --ostype ubuntu --unprivileged 0 --features nesting=1
 
-# Iniciar contenedores
+# Iniciar
 pct start 201
 pct start 202
 
@@ -42,43 +42,35 @@ pct enter 201
 
 > `--unprivileged 0` es necesario porque Keepalived necesita capacidades de red.
 
-### Configurar servicio web (Apache) en ambos contenedores
-
-En cada contenedor (vía `pct enter` o SSH):
+### Configurar Apache en ambos contenedores
 
 ```bash
-# Establecer hostname
-hostnamectl set-hostname server-mario1  # o server-mario2
-
-# Instalar Apache
+# Dentro de cada contenedor (pct enter 201 y 202)
 apt update && apt install apache2 -y
-
-# Crear página de identificación
 echo "<h1>Servidor Web $(hostname)</h1>" > /var/www/html/index.html
 systemctl enable apache2 && systemctl restart apache2
 ```
 
-Comprobar que funciona:
+Comprobar:
 ```bash
 curl 127.0.0.1
 ```
 
 ---
 
-## Paso 2: Crear contenedor HAProxy (balanceador de carga)
+## Paso 2: Crear contenedor HAProxy
 
 | CT | Nombre | IP | Rol |
 |---|---|---|---|
-| CT 203 | haproxy | 192.168.1.200 | Balanceador de carga |
+| CT 203 | haproxy | 192.168.8.200 | Balanceador |
 
 ```bash
-pct create 203 haproxy --storage local --memory 256 \
-  --net0 name=eth0,bridge=vmbr0,ip=192.168.1.200/24,gw=192.168.1.1 \
-  --ostype ubuntu --unprivileged 1
+pct create 203 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
+  --storage local-lvm --memory 256 \
+  --net0 name=eth0,bridge=vmbr0,ip=192.168.8.200/24,gw=192.168.8.1 \
+  --hostname haproxy --ostype ubuntu --unprivileged 1
 
 pct start 203
-
-# Instalar HAProxy
 pct enter 203
 apt update && apt install haproxy -y
 ```
@@ -109,8 +101,8 @@ frontend web_frontend
 
 backend web_servers
     balance roundrobin
-    server server-mario1 192.168.1.101:80 check
-    server server-mario2 192.168.1.102:80 check
+    server mario-server1 192.168.8.101:80 check
+    server mario-server2 192.168.8.102:80 check
 ```
 
 ```bash
@@ -121,33 +113,31 @@ systemctl restart haproxy
 
 ## Paso 3: Verificar balanceo
 
-Comprueba que HAProxy balancea correctamente:
-
 ```bash
-# Desde cualquier máquina
-curl 192.168.1.200
-# Debe alternar entre "Servidor Web server-mario1" y "Servidor Web server-mario2"
+curl 192.168.8.200
+# Alterna entre "Servidor Web mario-server1" y "Servidor Web mario-server2"
 ```
 
 ---
 
 ## Paso 4: Instalar y configurar Keepalived
 
-Keepalived necesita que los contenedores server-mario1 y server-mario2 tengan ciertas capacidades. Si usaste `--unprivileged 0` al crearlos, ya funciona. Si no, edita `/etc/pve/lxc/201.conf` (y `202.conf` para server-mario2):
+Keepalived necesita contenedores privilegiados (`--unprivileged 0` ya lo aplica). Si no funciona, edita `/etc/pve/lxc/201.conf` (y `202.conf`):
 
 ```
 lxc.cap.drop:
 lxc.cgroup.devices.allow: c 10:118 rwm
 ```
 
-### Instalar Keepalived en server-mario1 y server-mario2
+### Instalar
 
 ```bash
-pct enter 201  # o 202
+pct enter 201
 apt install keepalived -y
+# Lo mismo en 202
 ```
 
-### Configurar Keepalived en server-mario1 (MASTER) - `/etc/keepalived/keepalived.conf`
+### Configurar en mario-server1 (MASTER) - `/etc/keepalived/keepalived.conf`
 
 ```cfg
 vrrp_instance VI_1 {
@@ -161,7 +151,7 @@ vrrp_instance VI_1 {
         auth_pass 1234
     }
     virtual_ipaddress {
-        192.168.1.100
+        192.168.8.100
     }
     track_script {
         chk_apache
@@ -169,7 +159,7 @@ vrrp_instance VI_1 {
 }
 ```
 
-### Configurar Keepalived en server-mario2 (BACKUP) - `/etc/keepalived/keepalived.conf`
+### Configurar en mario-server2 (BACKUP) - `/etc/keepalived/keepalived.conf`
 
 ```cfg
 vrrp_instance VI_1 {
@@ -183,7 +173,7 @@ vrrp_instance VI_1 {
         auth_pass 1234
     }
     virtual_ipaddress {
-        192.168.1.100
+        192.168.8.100
     }
     track_script {
         chk_apache
@@ -211,40 +201,35 @@ systemctl restart keepalived
 
 ## Paso 5: Probar failover
 
-1. **Comprobar VIP**: `ip a | grep 192.168.1.100` (debe aparecer en server-mario1)
-2. **Simular caída del server-mario1**: `systemctl stop apache2` en server-mario1
-3. **Verificar que VIP migra a server-mario2**: `ip a | grep 192.168.1.100` (ahora en server-mario2)
-4. **Acceder vía VIP**: `curl 192.168.1.100` (debe responder server-mario2)
-5. **Restaurar server-mario1**: `systemctl start apache2` y verificar que VIP vuelve a server-mario1
+1. **VIP**: `ip a | grep 192.168.8.100` (debe estar en mario-server1)
+2. **Caída**: `systemctl stop apache2` en mario-server1
+3. **Migración**: `ip a | grep 192.168.8.100` (ahora en mario-server2)
+4. **Acceso**: `curl 192.168.8.100` (responde mario-server2)
+5. **Restaurar**: `systemctl start apache2` en mario-server1 (VIP vuelve)
 
 ---
 
 ## Paso 6: Migración automática en cluster Proxmox
 
-Configurar el cluster Proxmox para migración automática de contenedores con prioridades.
-
-### 6.1 Crear el cluster Proxmox
+### 6.1 Crear cluster
 
 ```bash
-# En Marisma001 (nodo maestro)
+# En Marisma001
 pvecm create NOMBRE_CLUSTER
 
-# En Marisma002 y Marisma003 (nodos secundarios)
-pvecm add IP_DEL_MAESTRO
+# En Marisma002 y Marisma003
+pvecm add IP_MARISMA001
 ```
 
-### 6.2 Configurar HA para los contenedores
+### 6.2 Añadir contenedores al HA Manager
 
 ```bash
-# Añadir contenedores al gestor HA (usar ct: en vez de vm:)
 ha-manager add ct:201 --state started
 ha-manager add ct:202 --state started
 ha-manager add ct:203 --state started
 ```
 
-### 6.3 Configurar grupos de recursos HA
-
-Por línea de comandos en un nodo del cluster:
+### 6.3 Crear grupo HA
 
 ```bash
 pvesh create /cluster/ha/groups --group ha_group \
@@ -252,13 +237,7 @@ pvesh create /cluster/ha/groups --group ha_group \
   --type ordered --noed 1
 ```
 
-O desde la interfaz web:
-- Datacenter → HA → Groups → Crear grupo
-- Nombre: `ha_group`
-- Nodos ordenados por prioridad: `Marisma002, Marisma001, Marisma003`
-- Noed activado
-
-### 6.4 Asignar contenedores al grupo HA
+### 6.4 Asignar contenedores al grupo
 
 ```bash
 pvesh set /cluster/ha/resources/ct:201 --group ha_group
@@ -266,48 +245,31 @@ pvesh set /cluster/ha/resources/ct:202 --group ha_group
 pvesh set /cluster/ha/resources/ct:203 --group ha_group
 ```
 
-### 6.5 Verificar configuración HA
+### 6.5 Verificar
 
 ```bash
-# Ver grupos
 ha-manager config
-
-# Ver estado
 ha-manager status
-
-# Ver recursos
 ha-manager list
 ```
 
-### 6.6 Probar migración automática
+### 6.6 Probar migración
 
-**Opción A - Migración manual controlada:**
 ```bash
+# Opción A - Migración manual
 pvesh create /cluster/ha/resources/ct:201/migrate --node marisma001
-```
 
-**Opción B - Simular caída de nodo:**
-```bash
-# En el nodo a probar (ej. Marisma002)
-systemctl stop pve-cluster
-# o directamente:
-poweroff
+# Opción B - Caída de nodo
+systemctl stop pve-cluster  # en Marisma002
 ```
-
-Los contenedores deben migrar automáticamente a Marisma001 (siguiente prioridad).
 
 ---
 
 ## Verificación final
 
 ```bash
-# Estado del cluster
 pvecm status
-
-# Estado HA
 ha-manager status
-
-# Comprobar que los contenedores están corriendo
 pct list
 ```
 
@@ -315,9 +277,8 @@ pct list
 
 ## Notas
 
-- La prioridad definida es: **Marisma002** (1ª) → **Marisma001** (2ª) → **Marisma003** (3ª)
-- Los contenedores son **privilegiados** (`--unprivileged 0`) para que Keepalived funcione
-- En HA Manager se usa `ct:ID` en lugar de `vm:ID` para contenedores LXC
-- Keepalived usa VRRP para la IP virtual flotante entre web1 y web2
-- HAProxy balancea en round-robin entre ambos servidores web
-- Proxmox HA Manager migra contenedores automáticamente si un nodo del cluster cae
+- Prioridad cluster: **Marisma002** → **Marisma001** → **Marisma003**
+- Contenedores privilegiados (`--unprivileged 0`) para Keepalived
+- Usar `ct:ID` en HA Manager (no `vm:ID`)
+- Keepalived usa VRRP con VIP `192.168.8.100`
+- HAProxy balancea en round-robin entre mario-server1 y mario-server2
