@@ -62,16 +62,16 @@ curl 127.0.0.1
 
 | CT | Nombre | IP | Rol |
 |---|---|---|---|
-| CT 203 | haproxy | 192.168.8.200 | Balanceador |
+| CT 204 | haproxy | 192.168.8.200 | Balanceador |
 
 ```bash
-pct create 203 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
+pct create 204 local:vztmpl/ubuntu-24.04-standard_24.04-2_amd64.tar.zst \
   --storage local-lvm --memory 256 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.8.200/24,gw=192.168.8.1 \
   --hostname haproxy --ostype ubuntu --unprivileged 1
 
-pct start 203
-pct enter 203
+pct start 204
+pct enter 204
 apt update && apt install haproxy -y
 ```
 
@@ -226,7 +226,7 @@ pvecm add IP_MARISMA001
 ```bash
 ha-manager add ct:201 --state started
 ha-manager add ct:202 --state started
-ha-manager add ct:203 --state started
+ha-manager add ct:204 --state started
 ```
 
 ### 6.3 Crear grupo HA
@@ -242,7 +242,7 @@ pvesh create /cluster/ha/groups --group ha_group \
 ```bash
 pvesh set /cluster/ha/resources/ct:201 --group ha_group
 pvesh set /cluster/ha/resources/ct:202 --group ha_group
-pvesh set /cluster/ha/resources/ct:203 --group ha_group
+pvesh set /cluster/ha/resources/ct:204 --group ha_group
 ```
 
 ### 6.5 Verificar
