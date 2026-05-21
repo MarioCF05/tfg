@@ -15,8 +15,8 @@ Crea dos contenedores LXC con la misma configuración:
 
 | CT | Nombre | IP | Rol |
 |---|---|---|---|
-| CT 101 | server-mario1 | 192.168.1.101 | Servidor principal |
-| CT 102 | server-mario2 | 192.168.1.102 | Servidor secundario |
+| CT 201 | server-mario1 | 192.168.1.101 | Servidor principal |
+| CT 202 | server-mario2 | 192.168.1.102 | Servidor secundario |
 
 ```bash
 # Descargar template si no lo tienes
@@ -24,20 +24,20 @@ pveam update
 pveam available | grep ubuntu
 
 # Desde el nodo principal de Proxmox, crear los contenedores
-pct create 101 server-mario1 --storage local --memory 512 \
+pct create 201 server-mario1 --storage local --memory 512 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.101/24,gw=192.168.1.1 \
   --ostype ubuntu --unprivileged 0 --features nesting=1
 
-pct create 102 server-mario2 --storage local --memory 512 \
+pct create 202 server-mario2 --storage local --memory 512 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.102/24,gw=192.168.1.1 \
   --ostype ubuntu --unprivileged 0 --features nesting=1
 
 # Iniciar contenedores
-pct start 101
-pct start 102
+pct start 201
+pct start 202
 
 # Acceder
-pct enter 101
+pct enter 201
 ```
 
 > `--unprivileged 0` es necesario porque Keepalived necesita capacidades de red.
@@ -69,17 +69,17 @@ curl 127.0.0.1
 
 | CT | Nombre | IP | Rol |
 |---|---|---|---|
-| CT 103 | haproxy | 192.168.1.200 | Balanceador de carga |
+| CT 203 | haproxy | 192.168.1.200 | Balanceador de carga |
 
 ```bash
-pct create 103 template-name --storage local --memory 256 \
+pct create 203 haproxy --storage local --memory 256 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.200/24,gw=192.168.1.1 \
   --ostype ubuntu --unprivileged 1
 
-pct start 103
+pct start 203
 
 # Instalar HAProxy
-pct enter 103
+pct enter 203
 apt update && apt install haproxy -y
 ```
 
@@ -133,7 +133,7 @@ curl 192.168.1.200
 
 ## Paso 4: Instalar y configurar Keepalived
 
-Keepalived necesita que los contenedores web1 y web2 tengan ciertas capacidades. Si usaste `--unprivileged 0` al crearlos, ya funciona. Si no, edita `/etc/pve/lxc/101.conf`:
+Keepalived necesita que los contenedores server-mario1 y server-mario2 tengan ciertas capacidades. Si usaste `--unprivileged 0` al crearlos, ya funciona. Si no, edita `/etc/pve/lxc/201.conf` (y `202.conf` para server-mario2):
 
 ```
 lxc.cap.drop:
@@ -143,7 +143,7 @@ lxc.cgroup.devices.allow: c 10:118 rwm
 ### Instalar Keepalived en server-mario1 y server-mario2
 
 ```bash
-pct enter 101  # o 102
+pct enter 201  # o 202
 apt install keepalived -y
 ```
 
@@ -237,9 +237,9 @@ pvecm add IP_DEL_MAESTRO
 
 ```bash
 # Añadir contenedores al gestor HA (usar ct: en vez de vm:)
-ha-manager add ct:101 --state started
-ha-manager add ct:102 --state started
-ha-manager add ct:103 --state started
+ha-manager add ct:201 --state started
+ha-manager add ct:202 --state started
+ha-manager add ct:203 --state started
 ```
 
 ### 6.3 Configurar grupos de recursos HA
@@ -261,9 +261,9 @@ O desde la interfaz web:
 ### 6.4 Asignar contenedores al grupo HA
 
 ```bash
-pvesh set /cluster/ha/resources/ct:101 --group ha_group
-pvesh set /cluster/ha/resources/ct:102 --group ha_group
-pvesh set /cluster/ha/resources/ct:103 --group ha_group
+pvesh set /cluster/ha/resources/ct:201 --group ha_group
+pvesh set /cluster/ha/resources/ct:202 --group ha_group
+pvesh set /cluster/ha/resources/ct:203 --group ha_group
 ```
 
 ### 6.5 Verificar configuración HA
@@ -283,7 +283,7 @@ ha-manager list
 
 **Opción A - Migración manual controlada:**
 ```bash
-pvesh create /cluster/ha/resources/ct:101/migrate --node marisma001
+pvesh create /cluster/ha/resources/ct:201/migrate --node marisma001
 ```
 
 **Opción B - Simular caída de nodo:**
