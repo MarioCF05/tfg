@@ -1,30 +1,50 @@
-# Práctica 6-3: Alta Disponibilidad (HA) en Proxmox
+# Práctica 6-3: Alta Disponibilidad (HA) en Proxmox con Contenedores LXC
 
 ## Requisitos previos
 - Proxmox VE instalado (cluster con nodos: Marisma001, Marisma002, Marisma003)
-- Plantilla/ISO de Debian/Ubuntu para crear VMs
+- Template LXC de Debian/Ubuntu descargado (ej. `ubuntu-24.04-standard_24.04-2_amd64.tar.zst`)
 - Red configurada en Proxmox
+
+> **Nota:** Keepalived requiere contenedores **privilegiados** para funcionar (necesita acceso a capacidades de red como `CAP_NET_ADMIN` y `CAP_NET_RAW`).
 
 ---
 
-## Paso 1: Crear dos servidores virtuales en Proxmox
+## Paso 1: Crear dos contenedores web en Proxmox
 
-Crea dos VMs en Proxmox con la misma configuración:
+Crea dos contenedores LXC con la misma configuración:
 
-| VM | Nombre | IP | Rol |
+| CT | Nombre | IP | Rol |
 |---|---|---|---|
-| VM 101 | web1 | 192.168.1.101 | Servidor principal |
-| VM 102 | web2 | 192.168.1.102 | Servidor secundario |
+| CT 101 | web1 | 192.168.1.101 | Servidor principal |
+| CT 102 | web2 | 192.168.1.102 | Servidor secundario |
 
 ```bash
-# Desde el nodo principal de Proxmox, crea las VMs
-qm create 101 --name web1 --memory 512 --net0 virtio,bridge=vmbr0
-qm create 102 --name web2 --memory 512 --net0 virtio,bridge=vmbr0
+# Descargar template si no lo tienes
+pveam update
+pveam available | grep ubuntu
+
+# Desde el nodo principal de Proxmox, crear los contenedores
+pct create 101 template-name --storage local --memory 512 \
+  --net0 name=eth0,bridge=vmbr0,ip=192.168.1.101/24,gw=192.168.1.1 \
+  --ostype ubuntu --unprivileged 0 --features nesting=1
+
+pct create 102 template-name --storage local --memory 512 \
+  --net0 name=eth0,bridge=vmbr0,ip=192.168.1.102/24,gw=192.168.1.1 \
+  --ostype ubuntu --unprivileged 0 --features nesting=1
+
+# Iniciar contenedores
+pct start 101
+pct start 102
+
+# Acceder
+pct enter 101
 ```
 
-### Configurar servicio web (Apache/Nginx) en ambas VMs
+> `--unprivileged 0` es necesario porque Keepalived necesita capacidades de red.
 
-En cada VM:
+### Configurar servicio web (Apache) en ambos contenedores
+
+En cada contenedor (vía `pct enter` o SSH):
 
 ```bash
 # Instalar Apache
@@ -35,18 +55,28 @@ echo "<h1>Servidor Web $(hostname)</h1>" > /var/www/html/index.html
 systemctl enable apache2 && systemctl restart apache2
 ```
 
+Comprobar que funciona:
+```bash
+curl 127.0.0.1
+```
+
 ---
 
-## Paso 2: Instalar y configurar HAProxy (balanceador de carga)
+## Paso 2: Crear contenedor HAProxy (balanceador de carga)
 
-Crea una tercera VM para HAProxy:
-
-| VM | Nombre | IP | Rol |
+| CT | Nombre | IP | Rol |
 |---|---|---|---|
-| VM 103 | haproxy | 192.168.1.200 | Balanceador de carga |
+| CT 103 | haproxy | 192.168.1.200 | Balanceador de carga |
 
 ```bash
+pct create 103 template-name --storage local --memory 256 \
+  --net0 name=eth0,bridge=vmbr0,ip=192.168.1.200/24,gw=192.168.1.1 \
+  --ostype ubuntu --unprivileged 1
+
+pct start 103
+
 # Instalar HAProxy
+pct enter 103
 apt update && apt install haproxy -y
 ```
 
@@ -100,13 +130,21 @@ curl 192.168.1.200
 
 ## Paso 4: Instalar y configurar Keepalived
 
-En las VMs web1 y web2:
+Keepalived necesita que los contenedores web1 y web2 tengan ciertas capacidades. Si usaste `--unprivileged 0` al crearlos, ya funciona. Si no, edita `/etc/pve/lxc/101.conf`:
+
+```
+lxc.cap.drop:
+lxc.cgroup.devices.allow: c 10:118 rwm
+```
+
+### Instalar Keepalived en web1 y web2
 
 ```bash
+pct enter 101  # o 102
 apt install keepalived -y
 ```
 
-### Configurar Keepalived en web1 (maestro) - `/etc/keepalived/keepalived.conf`
+### Configurar Keepalived en web1 (MASTER) - `/etc/keepalived/keepalived.conf`
 
 ```cfg
 vrrp_instance VI_1 {
@@ -128,7 +166,7 @@ vrrp_instance VI_1 {
 }
 ```
 
-### Configurar Keepalived en web2 (backup) - `/etc/keepalived/keepalived.conf`
+### Configurar Keepalived en web2 (BACKUP) - `/etc/keepalived/keepalived.conf`
 
 ```cfg
 vrrp_instance VI_1 {
@@ -180,7 +218,7 @@ systemctl restart keepalived
 
 ## Paso 6: Migración automática en cluster Proxmox
 
-Configurar el cluster Proxmox para migración automática con prioridades.
+Configurar el cluster Proxmox para migración automática de contenedores con prioridades.
 
 ### 6.1 Crear el cluster Proxmox
 
@@ -192,36 +230,37 @@ pvecm create NOMBRE_CLUSTER
 pvecm add IP_DEL_MAESTRO
 ```
 
-### 6.2 Configurar HA para las VMs
+### 6.2 Configurar HA para los contenedores
 
 ```bash
-# Añadir VMs al gestor HA de Proxmox
-ha-manager add vm:101 --state started
-ha-manager add vm:102 --state started
-ha-manager add vm:103 --state started
+# Añadir contenedores al gestor HA (usar ct: en vez de vm:)
+ha-manager add ct:101 --state started
+ha-manager add ct:102 --state started
+ha-manager add ct:103 --state started
 ```
 
 ### 6.3 Configurar grupos de recursos HA
 
-En la interfaz web de Proxmox:
+Por línea de comandos en un nodo del cluster:
+
+```bash
+pvesh create /cluster/ha/groups --group ha_group \
+  --nodes "marisma002,marisma001,marisma003" \
+  --type ordered --noed 1
+```
+
+O desde la interfaz web:
 - Datacenter → HA → Groups → Crear grupo
 - Nombre: `ha_group`
 - Nodos ordenados por prioridad: `Marisma002, Marisma001, Marisma003`
-- Noed (no hay restricción)
+- Noed activado
 
-O por línea de comandos en un nodo del cluster:
-
-```bash
-pvesh create /cluster/ha/groups --group ha_group --nodes "marisma002,marisma001,marisma003" --type ordered --noed 1
-```
-
-### 6.4 Asignar VMs al grupo HA
+### 6.4 Asignar contenedores al grupo HA
 
 ```bash
-# Asignar cada VM al grupo HA
-pvesh set /cluster/ha/resources/vm:101 --group ha_group
-pvesh set /cluster/ha/resources/vm:102 --group ha_group
-pvesh set /cluster/ha/resources/vm:103 --group ha_group
+pvesh set /cluster/ha/resources/ct:101 --group ha_group
+pvesh set /cluster/ha/resources/ct:102 --group ha_group
+pvesh set /cluster/ha/resources/ct:103 --group ha_group
 ```
 
 ### 6.5 Verificar configuración HA
@@ -234,19 +273,17 @@ ha-manager config
 ha-manager status
 
 # Ver recursos
-ha-manager resources
+ha-manager list
 ```
 
 ### 6.6 Probar migración automática
 
+**Opción A - Migración manual controlada:**
 ```bash
-# Simular caída de Marisma002 (nodo con prioridad 1)
-# Desde otro nodo o desde Proxmox:
-pvesh create /cluster/ha/resources/vm:101/migrate --node marisma001
+pvesh create /cluster/ha/resources/ct:101/migrate --node marisma001
 ```
 
-O directamente apagar un nodo del cluster para ver la migración automática:
-
+**Opción B - Simular caída de nodo:**
 ```bash
 # En el nodo a probar (ej. Marisma002)
 systemctl stop pve-cluster
@@ -254,7 +291,7 @@ systemctl stop pve-cluster
 poweroff
 ```
 
-Las VMs deben migrar automáticamente a Marisma001 (siguiente prioridad).
+Los contenedores deben migrar automáticamente a Marisma001 (siguiente prioridad).
 
 ---
 
@@ -267,8 +304,8 @@ pvecm status
 # Estado HA
 ha-manager status
 
-# Comprobar que las VMs están corriendo
-qm list
+# Comprobar que los contenedores están corriendo
+pct list
 ```
 
 ---
@@ -276,6 +313,8 @@ qm list
 ## Notas
 
 - La prioridad definida es: **Marisma002** (1ª) → **Marisma001** (2ª) → **Marisma003** (3ª)
+- Los contenedores son **privilegiados** (`--unprivileged 0`) para que Keepalived funcione
+- En HA Manager se usa `ct:ID` en lugar de `vm:ID` para contenedores LXC
 - Keepalived usa VRRP para la IP virtual flotante entre web1 y web2
 - HAProxy balancea en round-robin entre ambos servidores web
-- Proxmox HA Manager migra VMs automáticamente si un nodo del cluster cae
+- Proxmox HA Manager migra contenedores automáticamente si un nodo del cluster cae
