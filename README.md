@@ -15,8 +15,8 @@ Crea dos contenedores LXC con la misma configuración:
 
 | CT | Nombre | IP | Rol |
 |---|---|---|---|
-| CT 101 | web1 | 192.168.1.101 | Servidor principal |
-| CT 102 | web2 | 192.168.1.102 | Servidor secundario |
+| CT 101 | server-mario1 | 192.168.1.101 | Servidor principal |
+| CT 102 | server-mario2 | 192.168.1.102 | Servidor secundario |
 
 ```bash
 # Descargar template si no lo tienes
@@ -24,11 +24,11 @@ pveam update
 pveam available | grep ubuntu
 
 # Desde el nodo principal de Proxmox, crear los contenedores
-pct create 101 template-name --storage local --memory 512 \
+pct create 101 server-mario1 --storage local --memory 512 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.101/24,gw=192.168.1.1 \
   --ostype ubuntu --unprivileged 0 --features nesting=1
 
-pct create 102 template-name --storage local --memory 512 \
+pct create 102 server-mario2 --storage local --memory 512 \
   --net0 name=eth0,bridge=vmbr0,ip=192.168.1.102/24,gw=192.168.1.1 \
   --ostype ubuntu --unprivileged 0 --features nesting=1
 
@@ -47,6 +47,9 @@ pct enter 101
 En cada contenedor (vía `pct enter` o SSH):
 
 ```bash
+# Establecer hostname
+hostnamectl set-hostname server-mario1  # o server-mario2
+
 # Instalar Apache
 apt update && apt install apache2 -y
 
@@ -106,8 +109,8 @@ frontend web_frontend
 
 backend web_servers
     balance roundrobin
-    server web1 192.168.1.101:80 check
-    server web2 192.168.1.102:80 check
+    server server-mario1 192.168.1.101:80 check
+    server server-mario2 192.168.1.102:80 check
 ```
 
 ```bash
@@ -123,7 +126,7 @@ Comprueba que HAProxy balancea correctamente:
 ```bash
 # Desde cualquier máquina
 curl 192.168.1.200
-# Debe alternar entre "Servidor Web web1" y "Servidor Web web2"
+# Debe alternar entre "Servidor Web server-mario1" y "Servidor Web server-mario2"
 ```
 
 ---
@@ -137,14 +140,14 @@ lxc.cap.drop:
 lxc.cgroup.devices.allow: c 10:118 rwm
 ```
 
-### Instalar Keepalived en web1 y web2
+### Instalar Keepalived en server-mario1 y server-mario2
 
 ```bash
 pct enter 101  # o 102
 apt install keepalived -y
 ```
 
-### Configurar Keepalived en web1 (MASTER) - `/etc/keepalived/keepalived.conf`
+### Configurar Keepalived en server-mario1 (MASTER) - `/etc/keepalived/keepalived.conf`
 
 ```cfg
 vrrp_instance VI_1 {
@@ -166,7 +169,7 @@ vrrp_instance VI_1 {
 }
 ```
 
-### Configurar Keepalived en web2 (BACKUP) - `/etc/keepalived/keepalived.conf`
+### Configurar Keepalived en server-mario2 (BACKUP) - `/etc/keepalived/keepalived.conf`
 
 ```cfg
 vrrp_instance VI_1 {
@@ -208,11 +211,11 @@ systemctl restart keepalived
 
 ## Paso 5: Probar failover
 
-1. **Comprobar VIP**: `ip a | grep 192.168.1.100` (debe aparecer en web1)
-2. **Simular caída del web1**: `systemctl stop apache2` en web1
-3. **Verificar que VIP migra a web2**: `ip a | grep 192.168.1.100` (ahora en web2)
-4. **Acceder vía VIP**: `curl 192.168.1.100` (debe responder web2)
-5. **Restaurar web1**: `systemctl start apache2` y verificar que VIP vuelve a web1
+1. **Comprobar VIP**: `ip a | grep 192.168.1.100` (debe aparecer en server-mario1)
+2. **Simular caída del server-mario1**: `systemctl stop apache2` en server-mario1
+3. **Verificar que VIP migra a server-mario2**: `ip a | grep 192.168.1.100` (ahora en server-mario2)
+4. **Acceder vía VIP**: `curl 192.168.1.100` (debe responder server-mario2)
+5. **Restaurar server-mario1**: `systemctl start apache2` y verificar que VIP vuelve a server-mario1
 
 ---
 
